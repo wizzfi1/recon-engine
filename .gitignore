@@ -1,0 +1,5 @@
+dist/ -r
+
+build/ -r
+
+__pycache__/ -r
