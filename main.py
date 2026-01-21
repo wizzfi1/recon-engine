@@ -4,7 +4,7 @@ from outputs.writer import write_excel
 from config import PASTEL_SHEET, IXTRAC_SHEET, OUTPUT_FILE
 
 
-INPUT_FILE = "DEMO FINANCE.xlsx"
+INPUT_FILE = "ULR47.xlsx"
 
 pastel = load_excel(INPUT_FILE, PASTEL_SHEET)
 ixtrac = load_excel(INPUT_FILE, IXTRAC_SHEET)

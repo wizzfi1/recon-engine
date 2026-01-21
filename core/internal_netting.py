@@ -2,10 +2,6 @@ import pandas as pd
 
 
 def _find_column(df, candidates):
-    """
-    Find a column in df whose lowercase stripped name
-    matches one of the candidate names.
-    """
     for col in df.columns:
         if col.strip().lower() in candidates:
             return col
@@ -16,31 +12,38 @@ def _find_column(df, candidates):
 
 def net_credit_debit(pastel: pd.DataFrame):
     """
-    Internally net Credit vs Debit entries in Pastel.
+    Internal netting using:
+    - Reference
+    - Amount
 
-    Rules:
-    - Credit > 0 can net against Debit > 0
-    - One-to-one matching by amount
-    - Netted entries are removed from further reconciliation
-    - Netted pairs are returned as an audit trail
+    One-to-one, deterministic, scalable.
     """
 
     pastel = pastel.copy()
 
-    # --- robust column detection ---
     credit_col = _find_column(pastel, {"credit"})
     debit_col = _find_column(pastel, {"debit"})
-    reference_col = _find_column(pastel, {"reference"})
+    ref_col = _find_column(pastel, {"reference"})
 
-    # --- split legs ---
-    credits = pastel[pastel[credit_col] > 0].copy().reset_index()
-    debits = pastel[pastel[debit_col] > 0].copy().reset_index()
+    pastel["_CREDIT_AMT"] = pastel[credit_col].fillna(0).round(2)
+    pastel["_DEBIT_AMT"] = pastel[debit_col].fillna(0).round(2)
+    pastel["_REF"] = pastel[ref_col].astype(str).str.strip()
 
-    # --- build netting keys (amount-based) ---
-    credits["NET_KEY"] = credits[credit_col].astype(str)
-    debits["NET_KEY"] = debits[debit_col].astype(str)
+    credits = pastel[pastel["_CREDIT_AMT"] > 0].copy().reset_index()
+    debits = pastel[pastel["_DEBIT_AMT"] > 0].copy().reset_index()
 
-    # --- one-to-one internal netting ---
+    # Build strict matching key
+    credits["NET_KEY"] = (
+        credits["_REF"] + "|" +
+        credits["_CREDIT_AMT"].astype(str)
+    )
+
+    debits["NET_KEY"] = (
+        debits["_REF"] + "|" +
+        debits["_DEBIT_AMT"].astype(str)
+    )
+
+    # One-to-one matching
     netted = credits.merge(
         debits,
         on="NET_KEY",
@@ -48,24 +51,27 @@ def net_credit_debit(pastel: pd.DataFrame):
         suffixes=("_credit", "_debit")
     )
 
-    # enforce strict one-to-one
+    # Enforce strict 1–1
     netted = netted.groupby("NET_KEY", as_index=False).head(1)
 
-    # --- audit trail ---
+    # Audit trail
     audit = pd.DataFrame({
-        "Credit_Reference": netted[f"{reference_col}_credit"],
-        "Credit_Amount": netted[f"{credit_col}_credit"],
-        "Debit_Reference": netted[f"{reference_col}_debit"],
-        "Debit_Amount": netted[f"{debit_col}_debit"],
-        "STATUS": "INTERNALLY_NETTED"
+        "Reference": netted["_REF_credit"],
+        "Credit_Amount": netted["_CREDIT_AMT_credit"],
+        "Debit_Amount": netted["_DEBIT_AMT_debit"],
+        "STATUS": "INTERNALLY_NETTED_REF_AMOUNT"
     })
 
-    # --- remove netted legs from pastel ---
     remove_idx = (
         netted["index_credit"].tolist()
         + netted["index_debit"].tolist()
     )
 
     remaining = pastel.drop(pastel.index[remove_idx])
+
+    remaining = remaining.drop(
+        columns=["_CREDIT_AMT", "_DEBIT_AMT", "_REF"],
+        errors="ignore"
+    )
 
     return remaining, audit

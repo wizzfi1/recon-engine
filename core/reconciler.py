@@ -1,39 +1,49 @@
 from datetime import datetime
-from core.internal_netting import net_credit_debit
+from core.internal_netting import net_credit_debit, _find_column
 from core.matchers import match_pastel_ixtrac
 from core.reasons import pastel_reason, ixtrac_reason
 
 
 def run_reconciliation(pastel, ixtrac):
-    # 1️⃣ Internal netting
-    pastel_remaining, netted = net_credit_debit(pastel)
+    pastel = pastel.copy()
 
-    # 2️⃣ External matching
+    credit_col = _find_column(pastel, {"credit"})
+    debit_col = _find_column(pastel, {"debit"})
+
+    # 1️⃣ Internal netting
+    pastel_after_netting, netted = net_credit_debit(pastel)
+
+    # 2️⃣ Remaining credits (potential reversals)
+    remaining_credits = pastel_after_netting[
+        pastel_after_netting[credit_col] > 0
+    ].copy()
+
+    pastel_debits_only = pastel_after_netting[
+        pastel_after_netting[debit_col] > 0
+    ].copy()
+
+    # 3️⃣ External matching (FULL candidate universe)
     merged, ixtrac_unmatched = match_pastel_ixtrac(
-        pastel_remaining, ixtrac
+        pastel_debits_only, ixtrac
     )
 
-    # 3️⃣ Fully confirmed (reference + name)
+    # 4️⃣ Basic confirmed (legacy)
     matched = merged[
         (merged["REFERENCE_MATCH"] == True) &
         (merged["NAME_SCORE"] >= 2)
     ].copy()
 
-    # 4️⃣ Amount + Name match but Reference mismatch (NEW)
-    ref_mismatch_name_amount = merged[
+    # 5️⃣ Ref mismatch but name+amount
+    ref_mismatch_name_amount_match = merged[
         (merged["REFERENCE_MATCH"] == False) &
-        (merged["NAME_SCORE"] >= 2)
+        (merged["NAME_SCORE"] >= 1)
     ].copy()
 
-    # 5️⃣ True Pastel unmatched
+    # 6️⃣ Pastel unmatched (no viable name signal at all)
     pastel_unmatched = merged[
-        ~(
-            ((merged["REFERENCE_MATCH"] == True) & (merged["NAME_SCORE"] >= 2)) |
-            ((merged["REFERENCE_MATCH"] == False) & (merged["NAME_SCORE"] >= 2))
-        )
+        merged["NAME_SCORE"] == 0
     ].copy()
 
-    # 6️⃣ Reason codes
     pastel_unmatched["REASON_CODE"] = pastel_unmatched.apply(
         pastel_reason, axis=1
     )
@@ -42,23 +52,25 @@ def run_reconciliation(pastel, ixtrac):
         ixtrac_reason, axis=1
     )
 
-    # 7️⃣ Summary
     summary = {
         "Run Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "Pastel Total": len(pastel),
         "IX TRAC Total": len(ixtrac),
         "Internally Netted": len(netted),
-        "Confirmed": len(matched),
-        "Ref Mismatch (Name+Amount Match)": len(ref_mismatch_name_amount),
+        "Remaining Credits (Pastel)": len(remaining_credits),
+        "Confirmed (Legacy)": len(matched),
+        "Candidates (Ref Mismatch)": len(ref_mismatch_name_amount_match),
         "Pastel Unmatched": len(pastel_unmatched),
         "IX TRAC Unmatched": len(ixtrac_unmatched),
     }
 
     return (
+        merged,                         # 🔑 FULL universe
         matched,
-        ref_mismatch_name_amount,
+        ref_mismatch_name_amount_match, # informational only
         pastel_unmatched,
         ixtrac_unmatched,
         netted,
+        remaining_credits,
         summary,
     )
