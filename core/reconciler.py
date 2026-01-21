@@ -5,17 +5,6 @@ from core.reasons import pastel_reason, ixtrac_reason
 
 
 def run_reconciliation(pastel, ixtrac):
-<<<<<<< HEAD
-    pastel_remaining, netted = net_credit_debit(pastel)
-
-    matched, pastel_unmatched, ixtrac_unmatched = match_pastel_ixtrac(
-        pastel_remaining, ixtrac
-    )
-
-    pastel_unmatched["REASON_CODE"] = pastel_unmatched.apply(
-        pastel_reason, axis=1
-    )
-=======
     # 1️⃣ Internal netting
     pastel_remaining, netted = net_credit_debit(pastel)
 
@@ -49,35 +38,22 @@ def run_reconciliation(pastel, ixtrac):
         pastel_reason, axis=1
     )
 
->>>>>>> master
     ixtrac_unmatched["REASON_CODE"] = ixtrac_unmatched.apply(
         ixtrac_reason, axis=1
     )
 
-<<<<<<< HEAD
-=======
     # 7️⃣ Summary
->>>>>>> master
     summary = {
         "Run Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "Pastel Total": len(pastel),
         "IX TRAC Total": len(ixtrac),
         "Internally Netted": len(netted),
-<<<<<<< HEAD
-        "Matched": len(matched),
-        "Confirmed": (matched["STATUS"] == "confirmed").sum(),
-        "Confirmed (2 names)": (matched["STATUS"] == "confirmed_2_names").sum(),
-=======
         "Confirmed": len(matched),
         "Ref Mismatch (Name+Amount Match)": len(ref_mismatch_name_amount),
->>>>>>> master
         "Pastel Unmatched": len(pastel_unmatched),
         "IX TRAC Unmatched": len(ixtrac_unmatched),
     }
 
-<<<<<<< HEAD
-    return matched, pastel_unmatched, ixtrac_unmatched, netted, summary
-=======
     return (
         matched,
         ref_mismatch_name_amount,
@@ -86,4 +62,3 @@ def run_reconciliation(pastel, ixtrac):
         netted,
         summary,
     )
->>>>>>> master
