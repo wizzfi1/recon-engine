@@ -1,15 +1,6 @@
 import pandas as pd
 
 
-<<<<<<< HEAD
-def net_credit_debit(pastel):
-    credits = pastel[pastel["Credit"] > 0].copy().reset_index()
-    debits = pastel[pastel["Debit"] > 0].copy().reset_index()
-
-    credits["NET_KEY"] = credits["Credit"].astype(str)
-    debits["NET_KEY"] = debits["Debit"].astype(str)
-
-=======
 def _find_column(df, candidates):
     """
     Find a column in df whose lowercase stripped name
@@ -50,7 +41,6 @@ def net_credit_debit(pastel: pd.DataFrame):
     debits["NET_KEY"] = debits[debit_col].astype(str)
 
     # --- one-to-one internal netting ---
->>>>>>> master
     netted = credits.merge(
         debits,
         on="NET_KEY",
@@ -58,18 +48,6 @@ def net_credit_debit(pastel: pd.DataFrame):
         suffixes=("_credit", "_debit")
     )
 
-<<<<<<< HEAD
-    netted = netted.groupby("NET_KEY").head(1)
-
-    audit = pd.DataFrame({
-        "Credit_Reference": netted["Reference_credit"],
-        "Credit_Amount": netted["Credit"],
-        "Debit_Reference": netted["Reference_debit"],
-        "Debit_Amount": netted["Debit"],
-        "STATUS": "INTERNALLY_NETTED"
-    })
-
-=======
     # enforce strict one-to-one
     netted = netted.groupby("NET_KEY", as_index=False).head(1)
 
@@ -83,7 +61,6 @@ def net_credit_debit(pastel: pd.DataFrame):
     })
 
     # --- remove netted legs from pastel ---
->>>>>>> master
     remove_idx = (
         netted["index_credit"].tolist()
         + netted["index_debit"].tolist()
