@@ -4,6 +4,8 @@ import threading
 from datetime import datetime
 import tkinter as tk
 from tkinter import filedialog, messagebox
+from PIL import Image, ImageTk
+import pandas as pd
 
 import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
@@ -30,18 +32,35 @@ FOOTER_TEXT = f"© 2026 {COMPANY_NAME} · Internal Finance System · {VERSION}"
 # =================================================
 
 
+def resource_path(relative_path):
+    """ Get absolute path to resource (works for dev and PyInstaller EXE) """
+    try:
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
+
+
 class ReconApp(ttk.Window):
     def __init__(self):
         super().__init__(themename="flatly")
 
         self.title(f"{COMPANY_NAME} — {APP_NAME}")
-        self.geometry("780x740")
+        self.geometry("780x780")
         self.resizable(False, False)
+
+        # ===== SET APP ICON =====
+        try:
+            icon_path = resource_path("assets/app.ico")
+            self.iconbitmap(icon_path)
+        except Exception as e:
+            print("Icon not loaded:", e)
 
         self.input_file = None
         self.output_dir = None
         self.output_path = None
         self.cancel_requested = False
+        self.workbook_sheets = []
 
         self._build_ui()
 
@@ -52,20 +71,25 @@ class ReconApp(ttk.Window):
         container = ttk.Frame(self, padding=24)
         container.pack(fill=BOTH, expand=True)
 
-        # Header
-        ttk.Label(
-            container,
-            text=COMPANY_NAME,
-            font=("Segoe UI", 16, "bold"),
-            foreground=PRIMARY_GREEN,
-        ).pack(anchor=W)
+        # ===== HEADER WITH LOGO =====
+        header_frame = ttk.Frame(container)
+        header_frame.pack(fill=X)
 
-        ttk.Label(
-            container,
-            text=f"{APP_NAME} · {DEPARTMENT_NAME}",
-            font=("Segoe UI", 10),
-            foreground=TEXT_MUTED,
-        ).pack(anchor=W)
+        try:
+            logo_path = resource_path("assets/logo.jpg")
+            logo_img = Image.open(logo_path).resize((60, 60))
+            self.logo_photo = ImageTk.PhotoImage(logo_img)
+            ttk.Label(header_frame, image=self.logo_photo).pack(side=LEFT, padx=(0, 12))
+        except Exception as e:
+            print("Logo not loaded:", e)
+
+        header_text = ttk.Frame(header_frame)
+        header_text.pack(side=LEFT)
+
+        ttk.Label(header_text, text=COMPANY_NAME, font=("Segoe UI", 16, "bold"),
+                  foreground=PRIMARY_GREEN).pack(anchor=W)
+        ttk.Label(header_text, text=f"{APP_NAME} · {DEPARTMENT_NAME}",
+                  font=("Segoe UI", 10), foreground=TEXT_MUTED).pack(anchor=W)
 
         ttk.Separator(container).pack(fill=X, pady=14)
 
@@ -76,72 +100,60 @@ class ReconApp(ttk.Window):
         self.file_label = ttk.Label(file_frame, text="No file selected")
         self.file_label.pack(side=LEFT, fill=X, expand=True)
 
-        ttk.Button(
-            file_frame,
-            text="Choose Excel File",
-            command=self.browse_file,
-            bootstyle="secondary",
-        ).pack(side=RIGHT)
+        ttk.Button(file_frame, text="Choose Excel File",
+                   command=self.browse_file, bootstyle="secondary").pack(side=RIGHT)
+
+        # ---------- Sheet Mapping ----------
+        ttk.Label(container, text="Sheet Mapping", font=("Segoe UI", 10, "bold")).pack(anchor=W, pady=(10, 6))
+
+        sheet_frame = ttk.Frame(container)
+        sheet_frame.pack(fill=X)
+
+        self.pastel_sheet_var = tk.StringVar()
+        self.ixtrac_sheet_var = tk.StringVar()
+
+        ttk.Label(sheet_frame, text="Pastel Sheet:").grid(row=0, column=0, sticky=W, padx=4)
+        self.pastel_sheet_combo = ttk.Combobox(sheet_frame, textvariable=self.pastel_sheet_var, state="readonly")
+        self.pastel_sheet_combo.grid(row=0, column=1, padx=8)
+
+        ttk.Label(sheet_frame, text="IXTRAC Sheet:").grid(row=0, column=2, sticky=W, padx=4)
+        self.ixtrac_sheet_combo = ttk.Combobox(sheet_frame, textvariable=self.ixtrac_sheet_var, state="readonly")
+        self.ixtrac_sheet_combo.grid(row=0, column=3, padx=8)
 
         # ---------- Output folder ----------
-        ttk.Label(container, text="Output Folder", font=("Segoe UI", 10, "bold")).pack(
-            anchor=W, pady=(20, 6)
-        )
+        ttk.Label(container, text="Output Folder", font=("Segoe UI", 10, "bold")).pack(anchor=W, pady=(20, 6))
 
         folder_frame = ttk.Frame(container)
         folder_frame.pack(fill=X)
 
-        self.output_folder_label = ttk.Label(
-            folder_frame,
-            text="Same folder as input file",
-            foreground=TEXT_MUTED,
-        )
+        self.output_folder_label = ttk.Label(folder_frame, text="Same folder as input file", foreground=TEXT_MUTED)
         self.output_folder_label.pack(side=LEFT, fill=X, expand=True)
 
-        ttk.Button(
-            folder_frame,
-            text="Change",
-            command=self.choose_output_folder,
-            bootstyle="secondary",
-        ).pack(side=RIGHT)
+        ttk.Button(folder_frame, text="Change", command=self.choose_output_folder,
+                   bootstyle="secondary").pack(side=RIGHT)
 
         # ---------- Output filename ----------
-        ttk.Label(container, text="Output File Name", font=("Segoe UI", 10, "bold")).pack(
-            anchor=W, pady=(20, 6)
-        )
-
+        ttk.Label(container, text="Output File Name", font=("Segoe UI", 10, "bold")).pack(anchor=W, pady=(20, 6))
         self.filename_entry = ttk.Entry(container)
         self.filename_entry.pack(fill=X)
         self.filename_entry.insert(0, DEFAULT_OUTPUT_BASENAME)
 
         self.timestamp_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(
-            container,
-            text="Append timestamp to filename",
-            variable=self.timestamp_var,
-            bootstyle="success",
-        ).pack(anchor=W, pady=6)
+        ttk.Checkbutton(container, text="Append timestamp to filename",
+                        variable=self.timestamp_var, bootstyle="success").pack(anchor=W, pady=6)
 
         # ---------- Run / Cancel ----------
         btn_frame = ttk.Frame(container)
         btn_frame.pack(pady=24)
 
-        self.run_btn = ttk.Button(
-            btn_frame,
-            text="Run Reconciliation",
-            command=self.start_reconciliation,
-            bootstyle="success",
-            state=DISABLED,
-        )
+        self.run_btn = ttk.Button(btn_frame, text="Run Reconciliation",
+                                  command=self.start_reconciliation,
+                                  bootstyle="success", state=DISABLED)
         self.run_btn.pack(side=LEFT, padx=10)
 
-        self.cancel_btn = ttk.Button(
-            btn_frame,
-            text="Cancel",
-            command=self.request_cancel,
-            bootstyle="danger",
-            state=DISABLED,
-        )
+        self.cancel_btn = ttk.Button(btn_frame, text="Cancel",
+                                     command=self.request_cancel,
+                                     bootstyle="danger", state=DISABLED)
         self.cancel_btn.pack(side=LEFT, padx=10)
 
         self.progress = ttk.Progressbar(container, mode="indeterminate", length=500)
@@ -150,13 +162,9 @@ class ReconApp(ttk.Window):
         self.status = ttk.Label(container, text="Status: Waiting for file")
         self.status.pack(pady=6)
 
-        self.open_folder_btn = ttk.Button(
-            container,
-            text="Open Output Folder",
-            command=self.open_output_folder,
-            bootstyle="secondary",
-            state=DISABLED,
-        )
+        self.open_folder_btn = ttk.Button(container, text="Open Output Folder",
+                                          command=self.open_output_folder,
+                                          bootstyle="secondary", state=DISABLED)
         self.open_folder_btn.pack(pady=(10, 0))
 
         ttk.Separator(container).pack(fill=X, pady=20)
@@ -179,6 +187,19 @@ class ReconApp(ttk.Window):
             self.output_dir = os.path.dirname(path)
             self.output_folder_label.config(text=self.output_dir)
 
+        # Load sheet names
+        xls = pd.ExcelFile(path)
+        self.workbook_sheets = xls.sheet_names
+
+        self.pastel_sheet_combo["values"] = self.workbook_sheets
+        self.ixtrac_sheet_combo["values"] = self.workbook_sheets
+
+        if PASTEL_SHEET in self.workbook_sheets:
+            self.pastel_sheet_var.set(PASTEL_SHEET)
+
+        if IXTRAC_SHEET in self.workbook_sheets:
+            self.ixtrac_sheet_var.set(IXTRAC_SHEET)
+
     def choose_output_folder(self):
         folder = filedialog.askdirectory()
         if folder:
@@ -186,8 +207,6 @@ class ReconApp(ttk.Window):
             self.output_folder_label.config(text=folder)
 
     def confirm_large_file(self):
-        import pandas as pd
-
         try:
             rows = pd.read_excel(self.input_file, sheet_name=0).shape[0]
         except Exception:
@@ -203,6 +222,18 @@ class ReconApp(ttk.Window):
         return True
 
     def start_reconciliation(self):
+        pastel_sheet = self.pastel_sheet_var.get() or PASTEL_SHEET
+        ixtrac_sheet = self.ixtrac_sheet_var.get() or IXTRAC_SHEET
+
+        if pastel_sheet == ixtrac_sheet:
+            messagebox.showerror("Invalid Sheet Selection", 
+                                "Pastel and IXTRAC sheets must be different.")
+            return
+
+        if pastel_sheet == ixtrac_sheet:
+            messagebox.showerror("Invalid Selection", "Pastel and IXTRAC sheets must be different.")
+            return
+
         if not self.confirm_large_file():
             self.status.config(text="Status: Cancelled by user")
             return
@@ -225,9 +256,12 @@ class ReconApp(ttk.Window):
 
     def run_reconciliation(self):
         try:
+            pastel_sheet = self.pastel_sheet_var.get() or PASTEL_SHEET
+            ixtrac_sheet = self.ixtrac_sheet_var.get() or IXTRAC_SHEET
+
             self.after(0, lambda: self.update_status("Loading Excel data…"))
-            pastel = load_excel(self.input_file, PASTEL_SHEET)
-            ixtrac = load_excel(self.input_file, IXTRAC_SHEET)
+            pastel = load_excel(self.input_file, pastel_sheet)
+            ixtrac = load_excel(self.input_file, ixtrac_sheet)
 
             if self.cancel_requested:
                 self.after(0, self.on_cancelled)
@@ -247,12 +281,34 @@ class ReconApp(ttk.Window):
             name = f"{base}_{ts}.xlsx" if ts else f"{base}.xlsx"
 
             self.output_path = os.path.join(self.output_dir, name)
-            write_excel(self.output_path, *results)
+
+            (
+                matched,
+                ref_mismatch_name_amount_match,
+                reviewed_matches,
+                pastel_outstanding,
+                ixtrac_outstanding,
+                netted,
+                remaining_credits,
+                summary,
+            ) = results
+
+            write_excel(
+                self.output_path,
+                matched,
+                ref_mismatch_name_amount_match,
+                reviewed_matches,
+                pastel_outstanding,
+                ixtrac_outstanding,
+                netted,
+                remaining_credits,
+                summary,
+            )
 
             self.after(0, self.on_success)
 
         except Exception as e:
-            self.after(0, lambda: self.on_error(e))
+            self.after(0, self.on_error, e)
 
     def on_success(self):
         self.progress.stop()
@@ -270,16 +326,25 @@ class ReconApp(ttk.Window):
         messagebox.showwarning("Cancelled", "Reconciliation was cancelled.")
 
     def on_error(self, error):
-        self.progress.stop()
-        self.cancel_btn.config(state=DISABLED)
-        self.run_btn.config(state=NORMAL)
-        self.status.config(text="Status: Error occurred")
-        messagebox.showerror("Error", str(error))
+        try:
+            self.progress.stop()
+        except:
+            pass
+
+        try:
+            self.cancel_btn.config(state=DISABLED)
+            self.run_btn.config(state=NORMAL)
+            self.open_folder_btn.config(state=DISABLED)
+            self.status.config(text="Status: Error occurred")
+        except:
+            pass
+
+        # Show messagebox AFTER UI is stable
+        self.after(100, lambda: messagebox.showerror("Error", str(error)))
 
     def open_output_folder(self):
         if self.output_path:
-            folder = os.path.dirname(self.output_path)
-            os.startfile(folder)
+            os.startfile(os.path.dirname(self.output_path))
 
 
 if __name__ == "__main__":
