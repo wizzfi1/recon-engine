@@ -5,8 +5,8 @@ a = Analysis(
     ['ui_app.py'],
     pathex=[],
     binaries=[],
-    datas=[('assets', 'assets')],
-    hiddenimports=['core.reasons', 'core.matchers', 'core.internal_netting'],
+    datas=[('utils', 'utils'), ('core', 'core'), ('assets', 'assets')],
+    hiddenimports=[],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -35,4 +35,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=['assets\\app.ico'],
 )

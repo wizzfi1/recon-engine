@@ -1,5 +1,5 @@
 import pandas as pd
-from utils.text_match import name_match_score
+from app.engine.utils.text_match import name_match_score
 
 
 def safe_float(val):
@@ -64,12 +64,8 @@ def match_pastel_ixtrac(pastel: pd.DataFrame, ixtrac: pd.DataFrame):
                 str(i["WARRANT NO"]).strip()
             )
 
-            # 🚫 HARD GATE
-            # Reject unless:
-            # - name matches strongly (>=2 tokens)
-            # OR
-            # - reference matches
-            if score < 2 and not reference_equal:
+            # Reject totally weak matches (no name & no ref)
+            if score == 0 and not reference_equal:
                 continue
 
             priority = (reference_equal, score)
@@ -79,7 +75,6 @@ def match_pastel_ixtrac(pastel: pd.DataFrame, ixtrac: pd.DataFrame):
                 best_score = score
                 best_idx = idx
                 ref_match = reference_equal
-
 
         if best is None:
             # No acceptable candidate after filtering

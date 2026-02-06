@@ -1,49 +1,23 @@
 from datetime import datetime
 import pandas as pd
-from core.internal_netting import net_credit_debit, _find_column
-from core.matchers import match_pastel_ixtrac
-from core.reasons import pastel_reason, ixtrac_reason
-from core.reviewer import (
+
+from app.engine.core.internal_netting import net_credit_debit, _find_column
+from app.engine.core.matchers import match_pastel_ixtrac
+from app.engine.core.reasons import pastel_reason, ixtrac_reason
+from app.engine.core.reviewer import (
     review_pastel_against_ixtrac,
     review_ixtrac_against_pastel,
 )
-from utils.dataframe import remove_total_rows
-from core.validators import validate_all, DataValidationError
+from app.engine.utils.dataframe import remove_total_rows
 
 
 def run_reconciliation(pastel, ixtrac):
-
     pastel = remove_total_rows(pastel.copy())
     ixtrac = remove_total_rows(ixtrac.copy())
 
-    # ============================
-    # Detect columns
-    # ============================
     credit_col = _find_column(pastel, {"credit"})
     debit_col = _find_column(pastel, {"debit"})
 
-    pastel_cols = {
-        "debit": debit_col,
-        "credit": credit_col
-    }
-
-    ixtrac_cols = {
-        "net_amt": "NET AMT"
-    }
-
-    # ============================
-    # VALIDATION LAYER
-    # ============================
-    validate_all(
-        pastel,
-        ixtrac,
-        pastel_cols,
-        ixtrac_cols
-    )
-
-    # ============================
-    # INTERNAL NETTING
-    # ============================
     pastel_after_netting, netted = net_credit_debit(pastel)
 
     remaining_credits = pastel_after_netting[
@@ -54,9 +28,6 @@ def run_reconciliation(pastel, ixtrac):
         pastel_after_netting[debit_col] > 0
     ].copy()
 
-    # ============================
-    # EXTERNAL MATCHING
-    # ============================
     merged, ixtrac_unmatched = match_pastel_ixtrac(
         pastel_debits_only, ixtrac
     )
@@ -83,6 +54,7 @@ def run_reconciliation(pastel, ixtrac):
         ixtrac_reason, axis=1
     )
 
+    # 🔁 REVIEW PHASE (PAIR-AWARE)
     reviewed_pastel_pairs, pastel_outstanding = review_pastel_against_ixtrac(
         pastel_unmatched,
         ixtrac,

@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Reconciliation Engine</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+
+<body class="bg-gray-100 min-h-screen flex items-center justify-center">
+
+  <div class="bg-white p-8 rounded shadow w-full max-w-lg">
+
+    <header class="flex items-center gap-3 mb-6">
+      <img src="/static/logo.png" class="h-12 w-auto" />
+      <div>
+        <h1 class="text-lg font-semibold text-green-700">
+          Greenwich Registrars and Data Solutions
+        </h1>
+        <p class="text-sm text-gray-500">
+          Reconciliation Engine · Finance & Accounts
+        </p>
+      </div>
+    </header>
+
+    <input type="file" id="fileInput"
+           class="mb-4 block w-full border p-2"
+           accept=".xlsx,.xlsm" />
+
+    <div class="mb-4">
+      <label class="text-sm font-medium">Pastel Sheet</label>
+      <select id="pastelSelect" class="w-full border p-2"></select>
+    </div>
+
+    <div class="mb-4">
+      <label class="text-sm font-medium">IXTRAC Sheet</label>
+      <select id="ixtracSelect" class="w-full border p-2"></select>
+    </div>
+
+    <label class="flex items-center gap-2 text-sm mb-4">
+      <input type="checkbox" id="timestampToggle" checked />
+      Append timestamp to filename
+    </label>
+
+    <button id="runBtn"
+            class="bg-green-700 hover:bg-green-800 text-white px-4 py-2 rounded w-full">
+      Run Reconciliation
+    </button>
+
+    <div id="spinner" class="hidden text-sm mt-3 text-gray-500">
+      Processing… please wait
+    </div>
+
+    <p id="status" class="text-sm mt-2 text-gray-600">
+      Status: Waiting for file
+    </p>
+
+    <footer class="text-xs text-gray-400 text-center mt-6">
+      © 2026 Greenwich Registrars and Data Solutions · Internal Finance System · v1.0.0
+    </footer>
+
+  </div>
+
+<script src="/static/app.js?v=2026-01-29"></script>
+</body>
+</html>

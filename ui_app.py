@@ -15,6 +15,8 @@ from core.reconciler import run_reconciliation
 from outputs.writer import write_excel
 from config import PASTEL_SHEET, IXTRAC_SHEET
 
+from core.validators import DataValidationError
+
 
 # ================= BRAND CONFIG =================
 COMPANY_NAME = "Greenwich Registrars and Data Solutions"
@@ -307,6 +309,9 @@ class ReconApp(ttk.Window):
 
             self.after(0, self.on_success)
 
+        except DataValidationError as e:
+            self.after(0, self.on_error, e)
+
         except Exception as e:
             self.after(0, self.on_error, e)
 
@@ -326,21 +331,48 @@ class ReconApp(ttk.Window):
         messagebox.showwarning("Cancelled", "Reconciliation was cancelled.")
 
     def on_error(self, error):
+
+        from core.validators import annotate_errors, DataValidationError
+
         try:
             self.progress.stop()
         except:
             pass
 
-        try:
-            self.cancel_btn.config(state=DISABLED)
-            self.run_btn.config(state=NORMAL)
-            self.open_folder_btn.config(state=DISABLED)
-            self.status.config(text="Status: Error occurred")
-        except:
-            pass
+        self.cancel_btn.config(state=DISABLED)
+        self.run_btn.config(state=NORMAL)
+        self.status.config(text="Status: Validation failed")
 
-        # Show messagebox AFTER UI is stable
-        self.after(100, lambda: messagebox.showerror("Error", str(error)))
+        # If validation error → annotate workbook
+        if isinstance(error, DataValidationError):
+
+            pastel_sheet = self.pastel_sheet_var.get() or PASTEL_SHEET
+            ixtrac_sheet = self.ixtrac_sheet_var.get() or IXTRAC_SHEET
+
+            pastel = load_excel(self.input_file, pastel_sheet)
+            ixtrac = load_excel(self.input_file, ixtrac_sheet)
+
+            pastel_errors = [e for e in error.args[0] if e["sheet"] == "PASTEL"]
+            ixtrac_errors = [e for e in error.args[0] if e["sheet"] == "IXTRAC"]
+
+            pastel = annotate_errors(pastel, pastel_errors)
+            ixtrac = annotate_errors(ixtrac, ixtrac_errors)
+
+            error_file = self.input_file.replace(
+                ".xlsx", "_VALIDATION_ERRORS.xlsx"
+            )
+
+            with pd.ExcelWriter(error_file, engine="xlsxwriter") as writer:
+                pastel.to_excel(writer, sheet_name=pastel_sheet, index=False)
+                ixtrac.to_excel(writer, sheet_name=ixtrac_sheet, index=False)
+
+            self.after(100, lambda: messagebox.showerror(
+                "Validation Failed",
+                f"Errors found.\n\nAnnotated file saved:\n{error_file}"
+            ))
+
+        else:
+            self.after(100, lambda: messagebox.showerror("Error", str(error)))
 
     def open_output_folder(self):
         if self.output_path:
