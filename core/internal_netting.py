@@ -22,18 +22,25 @@ def net_credit_debit(pastel: pd.DataFrame):
     debit_col = _find_column(pastel, {"debit"})
     ref_col = _find_column(pastel, {"reference"})
 
+    # Preserve original index explicitly
+    pastel["_ORIG_IDX"] = pastel.index
+
     pastel["_CREDIT_AMT"] = pastel[credit_col].apply(safe_to_float).round(2)
     pastel["_DEBIT_AMT"] = pastel[debit_col].apply(safe_to_float).round(2)
     pastel["_REF"] = pastel[ref_col].astype(str).str.strip()
 
-    credits = pastel[pastel["_CREDIT_AMT"] > 0].copy().reset_index()
-    debits = pastel[pastel["_DEBIT_AMT"] > 0].copy().reset_index()
+    credits = pastel[pastel["_CREDIT_AMT"] > 0].copy()
+    debits = pastel[pastel["_DEBIT_AMT"] > 0].copy()
 
     credits["NET_KEY"] = credits["_REF"] + "|" + credits["_CREDIT_AMT"].astype(str)
     debits["NET_KEY"] = debits["_REF"] + "|" + debits["_DEBIT_AMT"].astype(str)
 
-    netted = credits.merge(debits, on="NET_KEY", how="inner", suffixes=("_credit", "_debit"))
-    netted = netted.groupby("NET_KEY", as_index=False).head(1)
+    netted = credits.merge(
+        debits,
+        on="NET_KEY",
+        how="inner",
+        suffixes=("_credit", "_debit")
+    ).groupby("NET_KEY", as_index=False).head(1)
 
     audit = pd.DataFrame({
         "Reference": netted["_REF_credit"],
@@ -42,9 +49,18 @@ def net_credit_debit(pastel: pd.DataFrame):
         "STATUS": "INTERNALLY_NETTED_REF_AMOUNT"
     })
 
-    remove_idx = netted["index_credit"].tolist() + netted["index_debit"].tolist()
-    remaining = pastel.drop(pastel.index[remove_idx])
+    # 🔒 SAFE removal using original index values
+    remove_ids = (
+        netted["_ORIG_IDX_credit"].tolist()
+        + netted["_ORIG_IDX_debit"].tolist()
+    )
 
-    remaining = remaining.drop(columns=["_CREDIT_AMT", "_DEBIT_AMT", "_REF"], errors="ignore")
+    remaining = pastel.loc[~pastel["_ORIG_IDX"].isin(remove_ids)].copy()
+
+    remaining.drop(
+        columns=["_CREDIT_AMT", "_DEBIT_AMT", "_REF", "_ORIG_IDX"],
+        inplace=True,
+        errors="ignore"
+    )
 
     return remaining, audit

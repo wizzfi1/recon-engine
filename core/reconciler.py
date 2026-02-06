@@ -1,45 +1,29 @@
 from datetime import datetime
 import pandas as pd
+
 from core.internal_netting import net_credit_debit, _find_column
 from core.matchers import match_pastel_ixtrac
-from core.reasons import pastel_reason, ixtrac_reason
 from core.reviewer import (
     review_pastel_against_ixtrac,
     review_ixtrac_against_pastel,
 )
+from core.reasons import pastel_reason, ixtrac_reason
 from utils.dataframe import remove_total_rows
-from core.validators import validate_all, DataValidationError
+from core.validators import validate_all
 
 
 def run_reconciliation(pastel, ixtrac):
-
     pastel = remove_total_rows(pastel.copy())
     ixtrac = remove_total_rows(ixtrac.copy())
 
-    # ============================
-    # Detect columns
-    # ============================
     credit_col = _find_column(pastel, {"credit"})
     debit_col = _find_column(pastel, {"debit"})
 
-    pastel_cols = {
-        "debit": debit_col,
-        "credit": credit_col
-    }
+    pastel_cols = {"debit": debit_col, "credit": credit_col}
+    ixtrac_cols = {"net_amt": "NET AMT"}
 
-    ixtrac_cols = {
-        "net_amt": "NET AMT"
-    }
-
-    # ============================
-    # VALIDATION LAYER
-    # ============================
-    validate_all(
-        pastel,
-        ixtrac,
-        pastel_cols,
-        ixtrac_cols
-    )
+    # 🚫 HARD STOP if validation fails
+    validate_all(pastel, ixtrac, pastel_cols, ixtrac_cols)
 
     # ============================
     # INTERNAL NETTING
@@ -66,15 +50,14 @@ def run_reconciliation(pastel, ixtrac):
         (merged["NAME_SCORE"] >= 2)
     ].copy()
 
-    ref_mismatch_name_amount_match = merged[
+    ref_mismatch = merged[
         (merged["REFERENCE_MATCH"] == False) &
-        (merged["NAME_SCORE"] >= 1)
+        (merged["NAME_SCORE"] >= 2)
     ].copy()
 
     pastel_unmatched = merged[
         merged["MATCH_STATUS"].isin(["NO_IXTRAC", "NO_VALID_CANDIDATE"])
     ].copy()
-
     pastel_unmatched["REASON_CODE"] = pastel_unmatched.apply(
         pastel_reason, axis=1
     )
@@ -84,28 +67,18 @@ def run_reconciliation(pastel, ixtrac):
     )
 
     reviewed_pastel_pairs, pastel_outstanding = review_pastel_against_ixtrac(
-        pastel_unmatched,
-        ixtrac,
-        pastel_amt_col="Debit",
-        ixtrac_amt_col="NET AMT",
-        pastel_ref_col="Reference",
-        ixtrac_ref_col="WARRANT NO",
-        pastel_name_col="Description",
-        ixtrac_name_col="NAME",
+        pastel_unmatched, ixtrac,
+        "Debit", "NET AMT",
+        "Reference", "WARRANT NO",
+        "Description", "NAME",
     )
 
     reviewed_ixtrac_pairs, ixtrac_outstanding = review_ixtrac_against_pastel(
-        ixtrac_unmatched,
-        pastel,
-        ixtrac_amt_col="NET AMT",
-        pastel_amt_col="Debit",
-        ixtrac_ref_col="WARRANT NO",
-        pastel_ref_col="Reference",
-        ixtrac_name_col="NAME",
-        pastel_name_col="Description",
+        ixtrac_unmatched, pastel,
+        "NET AMT", "Debit",
+        "WARRANT NO", "Reference",
+        "NAME", "Description",
     )
-
-    all_reviewed_pairs = reviewed_pastel_pairs + reviewed_ixtrac_pairs
 
     reviewed_matches = pd.DataFrame([
         {
@@ -113,25 +86,25 @@ def run_reconciliation(pastel, ixtrac):
             **{f"IXTRAC_{k}": v for k, v in x.to_dict().items()},
             "REVIEW_RULE": rule
         }
-        for p, x, rule in all_reviewed_pairs
+        for p, x, rule in (reviewed_pastel_pairs + reviewed_ixtrac_pairs)
     ])
 
     summary = {
         "Run Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "Pastel Total": len(pastel),
-        "IX TRAC Total": len(ixtrac),
+        "Pastel Rows": len(pastel),
+        "IXTRAC Rows": len(ixtrac),
         "Internally Netted": len(netted),
         "Remaining Credits": len(remaining_credits),
         "Confirmed": len(matched),
-        "Ref Mismatch Candidates": len(ref_mismatch_name_amount_match),
-        "Reviewed Matches": len(reviewed_matches),
+        "Ref Mismatch": len(ref_mismatch),
+        "Reviewed": len(reviewed_matches),
         "Pastel Outstanding": len(pastel_outstanding),
         "IXTRAC Outstanding": len(ixtrac_outstanding),
     }
 
     return (
         matched,
-        ref_mismatch_name_amount_match,
+        ref_mismatch,
         reviewed_matches,
         pastel_outstanding,
         ixtrac_outstanding,
