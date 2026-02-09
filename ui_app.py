@@ -70,9 +70,9 @@ class ReconApp(ttk.Window):
 
         self.title(f"{COMPANY_NAME} — {APP_NAME}")
         self.geometry("920x860")
-        self.resizable(False, False)
+        self.resizable(True, True)
 
-        # ✅ App icon (fixed)
+        # App icon
         try:
             self.iconbitmap(resource_path("assets/app.ico"))
         except Exception as e:

@@ -92,19 +92,24 @@ def run_reconciliation(pastel, ixtrac, progress=None):
             ixtrac_reason, axis=1
         )
 
+        warrant_col = _find_column(ixtrac, {"warrant no", "warr no"})
+
         reviewed_pastel_pairs, pastel_outstanding = review_pastel_against_ixtrac(
             pastel_unmatched, ixtrac,
             "Debit", "NET AMT",
-            "Reference", "WARRANT NO",
+            "Reference", warrant_col,
             "Description", "NAME",
         )
+        
+        warrant_col = _find_column(ixtrac, {"warrant no", "warr no"})
 
         reviewed_ixtrac_pairs, ixtrac_outstanding = review_ixtrac_against_pastel(
             ixtrac_unmatched, pastel,
             "NET AMT", "Debit",
-            "WARRANT NO", "Reference",
+            warrant_col, "Reference",
             "NAME", "Description",
         )
+
 
         reviewed_matches = pd.DataFrame([
             {
