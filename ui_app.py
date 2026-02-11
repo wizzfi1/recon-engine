@@ -248,20 +248,35 @@ class ReconApp(ttk.Window):
     # Progress rendering
     # ==================================================
     def render_stage(self, stage):
-        # Stop ALL spinners first
+        # 🔒 Hard stop after terminal state
+        if self.terminal_stage_reached:
+            return
+
+        # Stop all spinners
         for spinner in self.stage_spinners.values():
             spinner.stop()
 
-        # DONE is a terminal state — no spinner
+        if stage == "ERROR":
+            self.terminal_stage_reached = True
+
+            for lbl in self.stage_labels.values():
+                lbl.configure(bootstyle="danger")
+
+            self.progress.configure(value=100)
+            self.status.config(text="Status: Error occurred")
+            return
+
         if stage == "DONE":
-            for s, lbl in self.stage_labels.items():
+            self.terminal_stage_reached = True
+
+            for lbl in self.stage_labels.values():
                 lbl.configure(bootstyle="success")
 
             self.progress.configure(value=100)
             self.status.config(text="Status: Completed successfully")
             return
 
-        # Normal working stages
+        # Normal active stages
         for s, lbl in self.stage_labels.items():
             if s == stage:
                 lbl.configure(bootstyle="info")
@@ -273,7 +288,6 @@ class ReconApp(ttk.Window):
 
         self.progress.configure(value=STAGE_PERCENT[stage])
         self.status.config(text=f"Status: {STAGE_LABEL[stage]}")
-
 
     def render_metrics(self, metrics):
         """
@@ -308,6 +322,8 @@ class ReconApp(ttk.Window):
         path = filedialog.askopenfilename(filetypes=[("Excel Files", "*.xlsx")])
         if not path:
             return
+
+        self.reset_ui_state()  # 👈 ADD THIS
 
         self.input_file = path
         self.output_dir = os.path.dirname(path)
@@ -379,13 +395,80 @@ class ReconApp(ttk.Window):
             ))
 
         except DataValidationError as e:
-            self.after(0, lambda: messagebox.showerror("Validation Failed", str(e)))
-        finally:
-            self.after(0, lambda: (
-                self.run_btn.config(state=NORMAL),
-                self.cancel_btn.config(state=DISABLED)
-            ))
+            # Mark pipeline as failed
+            self.after(0, self.render_stage, "ERROR")
 
+            try:
+                # Reload original sheets
+                pastel = load_excel(self.input_file, self.pastel_sheet_var.get())
+                ixtrac = load_excel(self.input_file, self.ixtrac_sheet_var.get())
+
+                # Annotate errors
+                pastel_annotated = annotate_errors(pastel, e.errors, "PASTEL")
+                ixtrac_annotated = annotate_errors(ixtrac, e.errors, "IXTRAC")
+
+                # Build output path
+                base, ext = os.path.splitext(self.input_file)
+                error_file = f"{base}_VALIDATION_ERRORS{ext}"
+
+                # Write annotated workbook
+                with pd.ExcelWriter(error_file, engine="xlsxwriter") as writer:
+                    pastel_annotated.to_excel(
+                        writer,
+                        sheet_name=self.pastel_sheet_var.get(),
+                        index=False
+                    )
+                    ixtrac_annotated.to_excel(
+                        writer,
+                        sheet_name=self.ixtrac_sheet_var.get(),
+                        index=False
+                    )
+
+                # Notify user clearly
+                self.after(
+                    0,
+                    lambda: messagebox.showerror(
+                        "Validation Failed",
+                        "Reconciliation could not proceed due to data validation errors.\n\n"
+                        "An annotated copy of the original workbook has been generated, "
+                        "highlighting the exact rows and columns that require correction.\n\n"
+                        f"File saved as:\n{error_file}"
+                    )
+                )
+
+            except Exception as write_err:
+                # Absolute fallback (should never happen)
+                self.after(
+                    0,
+                    lambda: messagebox.showerror(
+                        "Validation Failed",
+                        f"{str(e)}\n\n"
+                        "Additionally, the system could not generate the annotated file.\n"
+                        f"Reason: {write_err}"
+                    )
+                )
+
+
+    def reset_ui_state(self):
+        # Unlock terminal state
+        self.terminal_stage_reached = False
+        self.cancel_requested = False
+
+        # Reset stage labels & spinners
+        for stage in STAGES:
+            self.stage_labels[stage].configure(bootstyle="secondary")
+            self.stage_spinners[stage].stop()
+
+        # Reset metrics
+        for key, lbl in self.metric_labels.items():
+            lbl.config(text=f"{key}: —")
+
+        # Reset progress + status
+        self.progress.configure(value=0)
+        self.status.config(text="Status: Ready")
+
+        # Buttons
+        self.cancel_btn.config(state=DISABLED)
 
 if __name__ == "__main__":
     ReconApp().mainloop()
