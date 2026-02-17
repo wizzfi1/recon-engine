@@ -1,26 +1,89 @@
+# core/reviewer.py
 import re
+from collections import defaultdict
 
 BUSINESS_STOPWORDS = {
     "ltd", "limited", "nigeria", "plc", "corp", "corporation",
     "trading", "trad", "services", "service", "company", "co"
 }
 
-def normalize_name(text):
-    text = re.sub(r"[^a-z0-9 ]", "", str(text).lower())
-    tokens = set(text.split())
-    return {t for t in tokens if t not in BUSINESS_STOPWORDS}
+_non_alnum = re.compile(r"[^a-z0-9 ]+")
+
+
+def normalize_name_tokens(text):
+    """
+    - lowercase
+    - remove non-alnum
+    - split tokens
+    - remove business stopwords
+    Returns frozenset for fast hashing.
+    """
+    text = _non_alnum.sub("", str(text).lower())
+    tokens = text.split()
+    return frozenset(t for t in tokens if t and t not in BUSINESS_STOPWORDS)
+
+
+def _is_nan(x: float) -> bool:
+    # NaN is the only value where x != x is True
+    return x != x
+
 
 def normalize_amount(val):
+    """
+    Convert numeric-looking values to float.
+    IMPORTANT: treat NaN as invalid -> return None
+    """
     try:
-        return float(str(val).replace(",", "").strip())
-    except:
+        x = float(str(val).replace(",", "").strip())
+        if _is_nan(x):
+            return None
+        return x
+    except Exception:
         return None
 
+
 def normalize_ref(val):
+    """
+    Preserve original behavior:
+    - If numeric-ish, coerce to int string (removes .0)
+    - Else fallback to stripped string
+    """
     try:
         return str(int(float(str(val).strip()))).strip()
-    except:
+    except Exception:
         return str(val).strip()
+
+
+def _precompute_review_fields(df, amt_col, ref_col, name_col):
+    """
+    Precompute normalized fields ONCE to avoid repeated work in loops.
+    Returns dicts keyed by dataframe index.
+    """
+    amt = {}
+    ref = {}
+    tokens = {}
+
+    for idx, v in df[amt_col].items():
+        amt[idx] = normalize_amount(v)
+
+    for idx, v in df[ref_col].items():
+        ref[idx] = normalize_ref(v)
+
+    for idx, v in df[name_col].items():
+        tokens[idx] = normalize_name_tokens(v)
+
+    return amt, ref, tokens
+
+
+def _build_ref_index_from_precomputed(ref_dict):
+    """
+    Build mapping: normalized_ref -> list[row_index]
+    Uses already-normalized refs (avoid normalizing twice).
+    """
+    ref_map = defaultdict(list)
+    for idx, r in ref_dict.items():
+        ref_map[r].append(idx)
+    return ref_map
 
 
 # ----------------------------
@@ -37,55 +100,76 @@ def review_pastel_against_ixtrac(
     ixtrac_name_col,
 ):
     reviewed_pairs = []
-    outstanding = []
+    outstanding_idx = []
     used_ixtrac = set()
 
-    for _, p in pastel_unmatched.iterrows():
-        matched = False
+    # Precompute once
+    p_amt, p_ref, p_tokens = _precompute_review_fields(
+        pastel_unmatched, pastel_amt_col, pastel_ref_col, pastel_name_col
+    )
+    x_amt, x_ref, x_tokens = _precompute_review_fields(
+        original_ixtrac, ixtrac_amt_col, ixtrac_ref_col, ixtrac_name_col
+    )
 
-        p_amt = normalize_amount(p[pastel_amt_col])
-        p_ref = normalize_ref(p[pastel_ref_col])
-        p_names = normalize_name(p[pastel_name_col])
+    # Block by REF (your rules require ref equality)
+    ix_ref_map = _build_ref_index_from_precomputed(x_ref)
 
-        if p_amt is None or len(p_names) < 2:
-            outstanding.append(p)
+    for p_idx in pastel_unmatched.index:
+        amt = p_amt.get(p_idx)
+        ref = p_ref.get(p_idx)
+        names = p_tokens.get(p_idx, frozenset())
+
+        # Same guard as before
+        if amt is None or len(names) < 2:
+            outstanding_idx.append(p_idx)
             continue
 
-        for _, x in original_ixtrac.iterrows():
-            if x.name in used_ixtrac:
+        candidates = ix_ref_map.get(ref, [])
+        if not candidates:
+            outstanding_idx.append(p_idx)
+            continue
+
+        int_amt = int(amt)  # safe because amt is not None/NaN
+        matched = False
+
+        for x_idx in candidates:
+            if x_idx in used_ixtrac:
                 continue
 
-            x_ref = normalize_ref(x[ixtrac_ref_col])
-            if x_ref != p_ref:
+            xamt = x_amt.get(x_idx)
+            if xamt is None:
                 continue
 
-            x_amt = normalize_amount(x[ixtrac_amt_col])
-            x_names = normalize_name(x[ixtrac_name_col])
-            if x_amt is None:
-                continue
-
-            name_overlap = len(p_names & x_names)
-            if name_overlap < 2:
+            overlap = len(names & x_tokens.get(x_idx, frozenset()))
+            if overlap < 2:
                 continue
 
             # Rule A1: Exact amount
-            if abs(p_amt - x_amt) < 0.01:
-                reviewed_pairs.append((p.copy(), x.copy(), "EXACT_AMT+2NAME+REF"))
-                used_ixtrac.add(x.name)
+            if abs(amt - xamt) < 0.01:
+                reviewed_pairs.append(
+                    (pastel_unmatched.loc[p_idx].copy(),
+                     original_ixtrac.loc[x_idx].copy(),
+                     "EXACT_AMT+2NAME+REF")
+                )
+                used_ixtrac.add(x_idx)
                 matched = True
                 break
 
             # Rule A2: Whole amount
-            if int(p_amt) == int(x_amt):
-                reviewed_pairs.append((p.copy(), x.copy(), "WHOLE_AMT+2NAME+REF"))
-                used_ixtrac.add(x.name)
+            if int_amt == int(xamt):  # safe because xamt is not None/NaN
+                reviewed_pairs.append(
+                    (pastel_unmatched.loc[p_idx].copy(),
+                     original_ixtrac.loc[x_idx].copy(),
+                     "WHOLE_AMT+2NAME+REF")
+                )
+                used_ixtrac.add(x_idx)
                 matched = True
                 break
 
         if not matched:
-            outstanding.append(p)
+            outstanding_idx.append(p_idx)
 
-    return reviewed_pairs, pastel_unmatched.loc[[r.name for r in outstanding]].copy()
+    return reviewed_pairs, pastel_unmatched.loc[outstanding_idx].copy()
 
 
 # ----------------------------
@@ -102,52 +186,72 @@ def review_ixtrac_against_pastel(
     pastel_name_col,
 ):
     reviewed_pairs = []
-    outstanding = []
+    outstanding_idx = []
     used_pastel = set()
 
-    for _, x in ixtrac_unmatched.iterrows():
-        matched = False
+    # Precompute once
+    x_amt, x_ref, x_tokens = _precompute_review_fields(
+        ixtrac_unmatched, ixtrac_amt_col, ixtrac_ref_col, ixtrac_name_col
+    )
+    p_amt, p_ref, p_tokens = _precompute_review_fields(
+        original_pastel, pastel_amt_col, pastel_ref_col, pastel_name_col
+    )
 
-        x_amt = normalize_amount(x[ixtrac_amt_col])
-        x_ref = normalize_ref(x[ixtrac_ref_col])
-        x_names = normalize_name(x[ixtrac_name_col])
+    # Block by REF
+    pastel_ref_map = _build_ref_index_from_precomputed(p_ref)
 
-        if x_amt is None or len(x_names) < 2:
-            outstanding.append(x)
+    for x_idx in ixtrac_unmatched.index:
+        amt = x_amt.get(x_idx)
+        ref = x_ref.get(x_idx)
+        names = x_tokens.get(x_idx, frozenset())
+
+        if amt is None or len(names) < 2:
+            outstanding_idx.append(x_idx)
             continue
 
-        for _, p in original_pastel.iterrows():
-            if p.name in used_pastel:
+        candidates = pastel_ref_map.get(ref, [])
+        if not candidates:
+            outstanding_idx.append(x_idx)
+            continue
+
+        int_amt = int(amt)  # safe because amt is not None/NaN
+        matched = False
+
+        for p_idx in candidates:
+            if p_idx in used_pastel:
                 continue
 
-            p_ref = normalize_ref(p[pastel_ref_col])
-            if p_ref != x_ref:
+            pamt = p_amt.get(p_idx)
+            if pamt is None:
                 continue
 
-            p_amt = normalize_amount(p[pastel_amt_col])
-            p_names = normalize_name(p[pastel_name_col])
-            if p_amt is None:
-                continue
-
-            name_overlap = len(x_names & p_names)
-            if name_overlap < 2:
+            overlap = len(names & p_tokens.get(p_idx, frozenset()))
+            if overlap < 2:
                 continue
 
             # Rule B1: Exact amount
-            if abs(x_amt - p_amt) < 0.01:
-                reviewed_pairs.append((p.copy(), x.copy(), "EXACT_AMT+2NAME+REF"))
-                used_pastel.add(p.name)
+            if abs(amt - pamt) < 0.01:
+                reviewed_pairs.append(
+                    (original_pastel.loc[p_idx].copy(),
+                     ixtrac_unmatched.loc[x_idx].copy(),
+                     "EXACT_AMT+2NAME+REF")
+                )
+                used_pastel.add(p_idx)
                 matched = True
                 break
 
             # Rule B2: Whole amount
-            if int(x_amt) == int(p_amt):
-                reviewed_pairs.append((p.copy(), x.copy(), "WHOLE_AMT+2NAME+REF"))
-                used_pastel.add(p.name)
+            if int_amt == int(pamt):  # safe because pamt is not None/NaN
+                reviewed_pairs.append(
+                    (original_pastel.loc[p_idx].copy(),
+                     ixtrac_unmatched.loc[x_idx].copy(),
+                     "WHOLE_AMT+2NAME+REF")
+                )
+                used_pastel.add(p_idx)
                 matched = True
                 break
 
         if not matched:
-            outstanding.append(x)
+            outstanding_idx.append(x_idx)
 
-    return reviewed_pairs, ixtrac_unmatched.loc[[r.name for r in outstanding]].copy()
+    return reviewed_pairs, ixtrac_unmatched.loc[outstanding_idx].copy()

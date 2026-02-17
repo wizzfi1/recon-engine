@@ -80,45 +80,53 @@ def run_reconciliation(pastel, ixtrac, progress=None):
 
         # ================= REVIEW =================
         stage("REVIEW")
+
         pastel_unmatched = merged[
             merged["MATCH_STATUS"].isin(["NO_IXTRAC", "NO_VALID_CANDIDATE"])
         ].copy()
 
-        pastel_unmatched["REASON_CODE"] = pastel_unmatched.apply(
-            pastel_reason, axis=1
-        )
-
-        ixtrac_unmatched["REASON_CODE"] = ixtrac_unmatched.apply(
-            ixtrac_reason, axis=1
-        )
+        pastel_unmatched["REASON_CODE"] = pastel_unmatched.apply(pastel_reason, axis=1)
+        ixtrac_unmatched["REASON_CODE"] = ixtrac_unmatched.apply(ixtrac_reason, axis=1)
 
         warrant_col = _find_column(ixtrac, {"warrant no", "warr no"})
 
+        # ✅ IMPORTANT: review Pastel unmatched ONLY against ixtrac_unmatched
         reviewed_pastel_pairs, pastel_outstanding = review_pastel_against_ixtrac(
-            pastel_unmatched, ixtrac,
+            pastel_unmatched,
+            ixtrac_unmatched,                  # ✅ changed from ixtrac -> ixtrac_unmatched
             "Debit", "NET AMT",
             "Reference", warrant_col,
             "Description", "NAME",
         )
-        
-        warrant_col = _find_column(ixtrac, {"warrant no", "warr no"})
 
+        # ✅ IMPORTANT: review ixtrac_unmatched ONLY against the Pastel population you matched against
         reviewed_ixtrac_pairs, ixtrac_outstanding = review_ixtrac_against_pastel(
-            ixtrac_unmatched, pastel,
+            ixtrac_unmatched,
+            pastel_debits_only,                # ✅ changed from pastel -> pastel_debits_only
             "NET AMT", "Debit",
             warrant_col, "Reference",
             "NAME", "Description",
         )
 
+        reviewed_rows = []
 
-        reviewed_matches = pd.DataFrame([
-            {
-                **{f"PASTEL_{k}": v for k, v in p.to_dict().items()},
-                **{f"IXTRAC_{k}": v for k, v in x.to_dict().items()},
+        for p, x, rule in (reviewed_pastel_pairs + reviewed_ixtrac_pairs):
+            p2 = p.copy()
+            x2 = x.copy()
+
+            # ✅ overwrite the old “no match” reason
+            if "REASON_CODE" in p2:
+                p2["REASON_CODE"] = "REVIEW_MATCHED"
+            if "REASON_CODE" in x2:
+                x2["REASON_CODE"] = "REVIEW_MATCHED"
+
+            reviewed_rows.append({
+                **{f"PASTEL_{k}": v for k, v in p2.to_dict().items()},
+                **{f"IXTRAC_{k}": v for k, v in x2.to_dict().items()},
                 "REVIEW_RULE": rule
-            }
-            for p, x, rule in (reviewed_pastel_pairs + reviewed_ixtrac_pairs)
-        ])
+            })
+
+        reviewed_matches = pd.DataFrame(reviewed_rows)
 
         summary = {
             "Run Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
