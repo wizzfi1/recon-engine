@@ -1,20 +1,38 @@
-import pandas as pd
+# core/internal_netting.py
 import re
+from collections import defaultdict, Counter
+import pandas as pd
 
 
-BUSINESS_STOPWORDS = {
+# ---- tuneables (safety/performance) ----
+MAX_BUCKET_SCAN = 5000
+# If a single amount has > MAX_BUCKET_SCAN rows (credits+debits),
+# we avoid deep scanning because it can still be heavy.
+# We will still attempt matching using token index, but we won't do naive O(n*m).
+
+
+# ---- name normalization ----
+# NOTE: include estate-related words here so "EST OF OGUNDELE" -> {"ogundele"}
+NETTING_STOPWORDS = {
     "ltd", "limited", "nigeria", "plc", "corp", "corporation",
     "trading", "trad", "services", "service", "company", "co",
-    "the", "estate", "est", "of"
+    "estate", "est", "of", "the", "trust", "late",
+    "mr", "mrs", "miss", "dr", "chief", "sir", "madam",
 }
-
 _non_alnum = re.compile(r"[^a-z0-9 ]+")
+
+
+def _normalize_name_tokens(text) -> tuple[str, ...]:
+    s = _non_alnum.sub(" ", str(text).lower()).strip()
+    toks = [t for t in s.split() if t and t not in NETTING_STOPWORDS]
+    # tuple is hashable & fast
+    return tuple(toks)
 
 
 def safe_to_float(val):
     try:
-        return float(str(val).replace(",", "").strip())
-    except:
+        return float(str(val).replace(",", "").replace("+", "").strip())
+    except Exception:
         return 0.0
 
 
@@ -25,35 +43,17 @@ def _find_column(df, candidates):
     raise KeyError(f"None of {candidates} found in columns: {df.columns.tolist()}")
 
 
-def _name_key(text: str) -> str:
+def _strong_name_match(a_tokens: tuple[str, ...], b_tokens: tuple[str, ...]) -> bool:
     """
-    Normalized name key:
-    - lower
-    - remove non-alphanumeric
-    - remove stopwords
-    - sort tokens (so word order doesn't matter)
+    Controlled name match gate for fallback netting:
+      - allow >=2 shared tokens
+      - OR allow 1 shared token if it is "strong" (len>=6, not numeric)
     """
-    text = _non_alnum.sub(" ", str(text).lower())
-    tokens = [t for t in text.split() if t and t not in BUSINESS_STOPWORDS]
-    if not tokens:
-        return ""
-    tokens.sort()
-    return " ".join(tokens)
+    if not a_tokens or not b_tokens:
+        return False
 
-
-def _strong_name_match(a_key: str, b_key: str) -> bool:
-    """
-    Controlled name match gate:
-
-    Allow if:
-      - >=2 shared tokens, OR
-      - exactly 1 shared token, but it is a "strong" token
-        (len>=6 and not numeric)
-
-    This supports cases like: "EST OF OGUNDELE" -> {"ogundele"} (single strong token)
-    """
-    a = set(a_key.split()) if a_key else set()
-    b = set(b_key.split()) if b_key else set()
+    a = set(a_tokens)
+    b = set(b_tokens)
     common = a & b
 
     if len(common) >= 2:
@@ -69,139 +69,184 @@ def _strong_name_match(a_key: str, b_key: str) -> bool:
 
 def net_credit_debit(pastel: pd.DataFrame):
     """
-    Internally net Pastel credits vs debits.
+    Internal netting:
+      Stage A (strict): REF + AMOUNT nets credit vs debit
+      Stage B (fallback): NAME + AMOUNT nets credit vs debit (safe, no merge explosion)
 
-    Stage A (strict):
-      NET_KEY = REF|AMT
-
-    Stage B (fallback):
-      NET_KEY = NAMEKEY|AMT   (only if strong name overlap, amount same)
-
-    This solves cases like:
-      Ref=233 (credit) vs Ref=TRF (debit) but same beneficiary + amount.
+    Returns:
+      remaining_df, audit_df
     """
-
     pastel = pastel.copy()
 
     credit_col = _find_column(pastel, {"credit"})
     debit_col = _find_column(pastel, {"debit"})
     ref_col = _find_column(pastel, {"reference"})
 
-    # Try common name columns (Pastel usually has Description)
-    # If your Pastel uses another column, add it here.
-    try:
-        name_col = _find_column(pastel, {"description", "name", "beneficiary"})
-    except KeyError:
-        name_col = None  # fallback netting by name will be skipped if not found
+    # Name column can vary; try common ones
+    name_col = None
+    for cand in ("description", "name", "beneficiary", "narration"):
+        try:
+            name_col = _find_column(pastel, {cand})
+            break
+        except Exception:
+            continue
 
+    if name_col is None:
+        # fallback: if not found, we can still do Stage A strictly
+        name_col = None
+
+    # Preserve original index explicitly
     pastel["_ORIG_IDX"] = pastel.index
 
-    # Normalize amounts as absolute (we only care that credit and debit have same magnitude)
-    pastel["_CREDIT_AMT"] = pastel[credit_col].apply(safe_to_float).abs().round(2)
-    pastel["_DEBIT_AMT"] = pastel[debit_col].apply(safe_to_float).abs().round(2)
+    pastel["_CREDIT_AMT"] = pastel[credit_col].apply(safe_to_float).round(2)
+    pastel["_DEBIT_AMT"] = pastel[debit_col].apply(safe_to_float).round(2)
     pastel["_REF"] = pastel[ref_col].astype(str).str.strip()
 
     if name_col:
-        pastel["_NAMEKEY"] = pastel[name_col].apply(_name_key)
+        pastel["_NAME_TOKENS"] = pastel[name_col].apply(_normalize_name_tokens)
     else:
-        pastel["_NAMEKEY"] = ""
+        pastel["_NAME_TOKENS"] = [tuple()] * len(pastel)
 
     credits = pastel[pastel["_CREDIT_AMT"] > 0].copy()
     debits = pastel[pastel["_DEBIT_AMT"] > 0].copy()
 
-    # =========================
-    # STAGE A: REF + AMT netting
-    # =========================
-    credits["NET_KEY_A"] = credits["_REF"] + "|" + credits["_CREDIT_AMT"].astype(str)
-    debits["NET_KEY_A"] = debits["_REF"] + "|" + debits["_DEBIT_AMT"].astype(str)
+    # ----------------------------
+    # STAGE A: REF + AMOUNT
+    # ----------------------------
+    credit_map = defaultdict(list)  # (ref, amt) -> [orig_idx]
+    debit_map = defaultdict(list)
 
-    credits["_SEQ_A"] = credits.groupby("NET_KEY_A").cumcount()
-    debits["_SEQ_A"] = debits.groupby("NET_KEY_A").cumcount()
+    for _, r in credits.iterrows():
+        key = (r["_REF"], r["_CREDIT_AMT"])
+        credit_map[key].append(r["_ORIG_IDX"])
 
-    paired_a = credits.merge(
-        debits,
-        on=["NET_KEY_A", "_SEQ_A"],
-        how="inner",
-        suffixes=("_credit", "_debit")
-    )
+    for _, r in debits.iterrows():
+        key = (r["_REF"], r["_DEBIT_AMT"])
+        debit_map[key].append(r["_ORIG_IDX"])
 
-    audit_a = pd.DataFrame({
-        "Reference_Credit": paired_a["_REF_credit"],
-        "Reference_Debit": paired_a["_REF_debit"],
-        "Name": paired_a["_NAMEKEY_credit"],
-        "Credit_Amount": paired_a["_CREDIT_AMT_credit"],
-        "Debit_Amount": paired_a["_DEBIT_AMT_debit"],
-        "STATUS": "INTERNALLY_NETTED_REF_AMOUNT"
-    })
+    audit_rows = []
+    remove_ids = set()
 
-    remove_ids_a = (
-        paired_a["_ORIG_IDX_credit"].tolist()
-        + paired_a["_ORIG_IDX_debit"].tolist()
-    )
+    for key in set(credit_map.keys()) & set(debit_map.keys()):
+        c_list = credit_map[key]
+        d_list = debit_map[key]
+        pair_count = min(len(c_list), len(d_list))
 
-    remaining = pastel.loc[~pastel["_ORIG_IDX"].isin(remove_ids_a)].copy()
+        for i in range(pair_count):
+            c_id = c_list[i]
+            d_id = d_list[i]
+            remove_ids.add(c_id)
+            remove_ids.add(d_id)
+            audit_rows.append({
+                "Reference": key[0],
+                "Credit_Amount": key[1],
+                "Debit_Amount": key[1],
+                "STATUS": "INTERNALLY_NETTED_REF_AMOUNT",
+            })
 
-    # =========================
-    # STAGE B: NAME + AMT netting (fallback)
-    # =========================
-    audit_b = pd.DataFrame()
+    # Remaining after Stage A
+    rem_credits = credits.loc[~credits["_ORIG_IDX"].isin(remove_ids)].copy()
+    rem_debits = debits.loc[~debits["_ORIG_IDX"].isin(remove_ids)].copy()
 
-    if name_col:
-        credits_b = remaining[remaining["_CREDIT_AMT"] > 0].copy()
-        debits_b = remaining[remaining["_DEBIT_AMT"] > 0].copy()
+    # ----------------------------
+    # STAGE B: NAME + AMOUNT (safe)
+    # ----------------------------
+    # Group by amount to ensure we only compare like-for-like
+    # We DO NOT merge. We do indexed token matching.
+    credits_by_amt = defaultdict(list)
+    debits_by_amt = defaultdict(list)
 
-        # Only consider rows with usable name keys
-        credits_b = credits_b[credits_b["_NAMEKEY"].astype(str).str.len() >= 3]
-        debits_b = debits_b[debits_b["_NAMEKEY"].astype(str).str.len() >= 3]
+    for _, r in rem_credits.iterrows():
+        credits_by_amt[r["_CREDIT_AMT"]].append(r)
 
-        # Candidate key
-        credits_b["NET_KEY_B"] = credits_b["_NAMEKEY"] + "|" + credits_b["_CREDIT_AMT"].astype(str)
-        debits_b["NET_KEY_B"] = debits_b["_NAMEKEY"] + "|" + debits_b["_DEBIT_AMT"].astype(str)
+    for _, r in rem_debits.iterrows():
+        debits_by_amt[r["_DEBIT_AMT"]].append(r)
 
-        # Sequence pairing per key
-        credits_b["_SEQ_B"] = credits_b.groupby("NET_KEY_B").cumcount()
-        debits_b["_SEQ_B"] = debits_b.groupby("NET_KEY_B").cumcount()
+    for amt in set(credits_by_amt.keys()) & set(debits_by_amt.keys()):
+        c_rows = credits_by_amt[amt]
+        d_rows = debits_by_amt[amt]
 
-        paired_b = credits_b.merge(
-            debits_b,
-            on=["NET_KEY_B", "_SEQ_B"],
-            how="inner",
-            suffixes=("_credit", "_debit")
-        )
+        # Build token -> debit ORIG_IDX index for this amount bucket
+        token_to_debit_ids = defaultdict(list)
+        debit_tokens = {}
+        debit_ref = {}
+        for r in d_rows:
+            d_id = r["_ORIG_IDX"]
+            toks = r["_NAME_TOKENS"] or tuple()
+            debit_tokens[d_id] = toks
+            debit_ref[d_id] = r["_REF"]
+            for t in set(toks):
+                token_to_debit_ids[t].append(d_id)
 
-        # ✅ Safety gate (updated): allow >=2 tokens OR 1 strong token
-        keep = []
-        for _, row in paired_b.iterrows():
-            keep.append(_strong_name_match(row["_NAMEKEY_credit"], row["_NAMEKEY_debit"]))
+        used_debits = set()
 
-        paired_b = paired_b[pd.Series(keep, index=paired_b.index)]
+        # Optional safety: if bucket is huge, we still use token index,
+        # but we avoid any naive scans.
+        bucket_size = len(c_rows) + len(d_rows)
 
-        paired_b = paired_b[pd.Series(keep, index=paired_b.index)]
+        for r in c_rows:
+            c_id = r["_ORIG_IDX"]
+            c_toks = r["_NAME_TOKENS"] or tuple()
 
-        audit_b = pd.DataFrame({
-            "Reference_Credit": paired_b["_REF_credit"],
-            "Reference_Debit": paired_b["_REF_debit"],
-            "Name": paired_b["_NAMEKEY_credit"],
-            "Credit_Amount": paired_b["_CREDIT_AMT_credit"],
-            "Debit_Amount": paired_b["_DEBIT_AMT_debit"],
-            "STATUS": "INTERNALLY_NETTED_NAME_AMOUNT"
-        })
+            if not c_toks:
+                continue
 
-        remove_ids_b = (
-            paired_b["_ORIG_IDX_credit"].tolist()
-            + paired_b["_ORIG_IDX_debit"].tolist()
-        )
+            # Candidate scoring via token hits
+            hit_counts = Counter()
+            for t in set(c_toks):
+                for d_id in token_to_debit_ids.get(t, []):
+                    if d_id in used_debits:
+                        continue
+                    hit_counts[d_id] += 1
 
-        remaining = remaining.loc[~remaining["_ORIG_IDX"].isin(remove_ids_b)].copy()
+            if not hit_counts:
+                continue
 
-    # =========================
-    # cleanup
-    # =========================
+            # Filter to "acceptable" candidates using your controlled match gate
+            # Prefer more token overlap first
+            candidates = []
+            for d_id, overlap in hit_counts.items():
+                if overlap <= 0:
+                    continue
+                if _strong_name_match(c_toks, debit_tokens.get(d_id, tuple())):
+                    candidates.append((overlap, d_id))
+
+            if not candidates:
+                continue
+
+            # Choose best candidate: highest overlap first (stable)
+            candidates.sort(reverse=True, key=lambda x: x[0])
+            best_overlap, best_debit_id = candidates[0]
+
+            # Net it (one-to-one)
+            used_debits.add(best_debit_id)
+            remove_ids.add(c_id)
+            remove_ids.add(best_debit_id)
+
+            audit_rows.append({
+                "Reference": f"{r['_REF']} ↔ {debit_ref.get(best_debit_id, '')}".strip(),
+                "Credit_Amount": amt,
+                "Debit_Amount": amt,
+                "STATUS": "INTERNALLY_NETTED_NAME_AMOUNT",
+            })
+
+            # If bucket is enormous, allow early exit once one side exhausted
+            if bucket_size > MAX_BUCKET_SCAN:
+                # If we already matched a lot, we can stop early if debits are exhausted
+                if len(used_debits) >= len(d_rows):
+                    break
+
+    # ----------------------------
+    # FINAL: build remaining + audit
+    # ----------------------------
+    remaining = pastel.loc[~pastel["_ORIG_IDX"].isin(remove_ids)].copy()
+
     remaining.drop(
-        columns=["_CREDIT_AMT", "_DEBIT_AMT", "_REF", "_ORIG_IDX", "_NAMEKEY"],
+        columns=["_CREDIT_AMT", "_DEBIT_AMT", "_REF", "_ORIG_IDX", "_NAME_TOKENS"],
         inplace=True,
         errors="ignore"
     )
 
-    audit = pd.concat([audit_a, audit_b], ignore_index=True)
+    audit = pd.DataFrame(audit_rows)
+
     return remaining, audit
