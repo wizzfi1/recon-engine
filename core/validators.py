@@ -114,11 +114,17 @@ def annotate_errors(df, errors, sheet_name):
     grouped = {}
     for err in sheet_errors:
         row_idx = err["row"] - 2  # Excel row → pandas index
+        # Missing-column errors use row=1 (header), which maps to -1.
+        # Clamp to 0 so they appear on the first data row.
+        if row_idx < 0:
+            row_idx = 0
         msg = f"{err['column']}: {err['message']}"
         grouped.setdefault(row_idx, []).append(msg)
 
     for row_idx, msgs in grouped.items():
         if 0 <= row_idx < len(df):
-            df.at[row_idx, col] = " | ".join(msgs)
+            existing = df.at[row_idx, col]
+            combined = (existing + " | " if existing else "") + " | ".join(msgs)
+            df.at[row_idx, col] = combined
 
     return df

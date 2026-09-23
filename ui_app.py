@@ -31,6 +31,53 @@ FOOTER_TEXT = f"© 2026 {COMPANY_NAME} · Internal Finance System · {VERSION}"
 # =================================================
 
 
+def _apply_error_highlighting(writer, df, errors, internal_sheet_name, excel_sheet_name):
+    """Highlight bad cells red and fill DATA_ERRORS column using xlsxwriter."""
+    workbook = writer.book
+    worksheet = writer.sheets[excel_sheet_name]
+    col_names = list(df.columns)
+
+    red_cell_fmt = workbook.add_format({"bg_color": "#FFC7CE", "font_color": "#9C0006"})
+    red_note_fmt = workbook.add_format({
+        "bg_color": "#FFC7CE", "font_color": "#9C0006",
+        "text_wrap": True, "bold": True,
+    })
+
+    errors_col_name = next((c for c in col_names if c.startswith("DATA_ERRORS")), None)
+    xl_errors_col = col_names.index(errors_col_name) if errors_col_name else None
+
+    # Group messages by xlsxwriter row for the DATA_ERRORS column
+    note_by_row = {}
+    for err in [e for e in errors if e["sheet"] == internal_sheet_name]:
+        # err["row"] is 1-based Excel row (1=header, 2=first data row)
+        # xlsxwriter is 0-based (0=header, 1=first data row)
+        xl_row = err["row"] - 1
+        # Missing-column errors have xl_row=0 (header); put them on first data row
+        xl_row = max(xl_row, 1)
+        msg = f"{err['column']}: {err['message']}"
+        note_by_row.setdefault(xl_row, []).append(msg)
+
+    # Write DATA_ERRORS notes in red
+    if xl_errors_col is not None:
+        for xl_row, msgs in note_by_row.items():
+            worksheet.write(xl_row, xl_errors_col, " | ".join(msgs), red_note_fmt)
+
+    # Highlight the actual bad cells in their original columns
+    for err in [e for e in errors if e["sheet"] == internal_sheet_name]:
+        col_name = err["column"]
+        if col_name not in col_names:
+            continue
+        xl_row = err["row"] - 1
+        if xl_row < 1:
+            continue
+        xl_col = col_names.index(col_name)
+        pandas_row = xl_row - 1
+        if 0 <= pandas_row < len(df):
+            val = df.iloc[pandas_row][col_name]
+            cell_val = "" if pd.isna(val) else val
+            worksheet.write(xl_row, xl_col, cell_val, red_cell_fmt)
+
+
 # ================= PROGRESS MODEL =================
 STAGES = ["LOAD", "VALIDATE", "NETTING", "MATCHING", "REVIEW", "WRITE", "DONE"]
 
@@ -422,6 +469,14 @@ class ReconApp(ttk.Window):
                         writer,
                         sheet_name=self.ixtrac_sheet_var.get(),
                         index=False
+                    )
+                    _apply_error_highlighting(
+                        writer, pastel_annotated, e.errors,
+                        "PASTEL", self.pastel_sheet_var.get()
+                    )
+                    _apply_error_highlighting(
+                        writer, ixtrac_annotated, e.errors,
+                        "IXTRAC", self.ixtrac_sheet_var.get()
                     )
 
                 # Notify user clearly

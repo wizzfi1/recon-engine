@@ -10,7 +10,12 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=[
+        "scipy", "sklearn", "transformers", "tensorflow", "torch",
+        "matplotlib", "IPython", "jupyter", "notebook", "cv2",
+        "fastapi", "uvicorn", "starlette", "anyio", "httpx",
+        "sqlalchemy", "aiohttp", "multiprocessing",
+    ],
     noarchive=False,
     optimize=0,
 )
